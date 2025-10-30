@@ -3,7 +3,77 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+# Support both new and legacy LangChain import paths, with a minimal fallback
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter  # >= 0.2
+except Exception:  # pragma: no cover
+    try:
+        from langchain.text_splitter import RecursiveCharacterTextSplitter  # < 0.2
+    except Exception:  # pragma: no cover
+        # Minimal internal fallback if LangChain is unavailable
+        import re as _re
+
+        class RecursiveCharacterTextSplitter:  # type: ignore
+            def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 0, separators=None):
+                self.chunk_size = int(max(1, chunk_size))
+                self.chunk_overlap = int(max(0, chunk_overlap))
+                self.separators = separators or [". "]
+
+            def split_text(self, text: str):
+                if not text:
+                    return []
+
+                # Split while preserving separators
+                pattern = "|".join(_re.escape(s) for s in self.separators)
+                parts = _re.split(f"({pattern})", text)
+                # Re-attach delimiters to the preceding segment
+                sentences = []
+                i = 0
+                while i < len(parts):
+                    seg = parts[i]
+                    if i + 1 < len(parts) and parts[i + 1] is not None:
+                        seg = (seg or "") + (parts[i + 1] or "")
+                        i += 2
+                    else:
+                        i += 1
+                    if seg:
+                        sentences.append(seg)
+
+                chunks = []
+                buf = ""
+                for s in sentences:
+                    if len(buf) + len(s) <= self.chunk_size:
+                        buf += s
+                    else:
+                        if buf:
+                            chunks.append(buf)
+                        # apply simple character overlap
+                        if self.chunk_overlap > 0 and len(buf) > 0:
+                            overlap_prefix = buf[-self.chunk_overlap :]
+                        else:
+                            overlap_prefix = ""
+                        buf = overlap_prefix + s
+
+                        # If still too large, hard-slice into fixed windows
+                        while len(buf) > self.chunk_size:
+                            chunks.append(buf[: self.chunk_size])
+                            if self.chunk_overlap > 0:
+                                buf = buf[self.chunk_size - self.chunk_overlap :]
+                            else:
+                                buf = buf[self.chunk_size :]
+
+                if buf:
+                    # Emit remaining buffer; trim if excessively long
+                    while len(buf) > self.chunk_size:
+                        chunks.append(buf[: self.chunk_size])
+                        if self.chunk_overlap > 0:
+                            buf = buf[self.chunk_size - self.chunk_overlap :]
+                        else:
+                            buf = buf[self.chunk_size :]
+                    if buf:
+                        chunks.append(buf)
+
+                return chunks
 
 
 # ------------------------ Section Guessing (metadata) -------------------

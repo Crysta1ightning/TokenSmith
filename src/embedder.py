@@ -1,7 +1,15 @@
+import os
 import numpy as np
 from typing import List, Union
-from llama_cpp import Llama
 from tqdm import tqdm
+
+# Optional HF dependency for non-GGUF models
+try:
+    from sentence_transformers import SentenceTransformer as HFSentenceTransformer
+except Exception:  # pragma: no cover
+    HFSentenceTransformer = None
+
+from llama_cpp import Llama
 
 class SentenceTransformer:
     def __init__(self, model_path: str, n_ctx: int = 40960, n_threads: int = None):
@@ -14,18 +22,33 @@ class SentenceTransformer:
             n_threads: Number of threads to use (None = auto-detect)
         """
         print(f"Loading model with n_ctx={n_ctx}, n_threads={n_threads}")
-        
-        self.model = Llama(
-            model_path=model_path,
-            n_ctx=n_ctx,
-            n_threads=n_threads,
-            embedding=True,
-            verbose=False,
-            n_batch=512,
-            use_mmap=True,
-            logits_all=True
-        )
+
+        self._use_llama = False
         self._embedding_dimension = None
+
+        is_local_file = os.path.isfile(model_path)
+        is_gguf = str(model_path).lower().endswith(".gguf")
+
+        if is_local_file and is_gguf:
+            # Local GGUF via llama.cpp
+            self._use_llama = True
+            self.model = Llama(
+                model_path=model_path,
+                n_ctx=n_ctx,
+                n_threads=n_threads,
+                embedding=True,
+                verbose=False,
+                n_batch=512,
+                use_mmap=True,
+                logits_all=True,
+            )
+        else:
+            # Fallback to HuggingFace sentence-transformers by model name
+            if HFSentenceTransformer is None:
+                raise ValueError(
+                    "sentence-transformers is not available. Install it or provide a local .gguf embedding model."
+                )
+            self.model = HFSentenceTransformer(model_path)
         
         _ = self.embedding_dimension
         print(f"Model loaded successfully. Embedding dimension: {self._embedding_dimension}")
@@ -34,8 +57,15 @@ class SentenceTransformer:
     def embedding_dimension(self) -> int:
         """Get embedding dimension (cached after first call)."""
         if self._embedding_dimension is None:
-            test_embedding = self.model.create_embedding("test")['data'][0]['embedding']
-            self._embedding_dimension = len(test_embedding)
+            if self._use_llama:
+                test_embedding = self.model.create_embedding("test")[
+                    'data'
+                ][0]['embedding']
+                self._embedding_dimension = len(test_embedding)
+            else:
+                # HF models expose dimension via a dummy encode
+                test_embedding = self.model.encode(["test"], normalize_embeddings=False)
+                self._embedding_dimension = int(test_embedding.shape[1])
         return self._embedding_dimension
 
     def encode(self, 
@@ -65,32 +95,43 @@ class SentenceTransformer:
             return np.array([], dtype=np.float32).reshape(0, -1)
         
         print(f"Encoding {len(texts)} texts with batch_size={batch_size}")
-        
-        embeddings = []
-        
-        # Process in batches
-        num_batches = (len(texts) + batch_size - 1) // batch_size
 
-        for i in tqdm(range(num_batches), desc="Encoding", disable=not show_progress_bar):
-            start_idx = i * batch_size
-            end_idx = min((i + 1) * batch_size, len(texts))
-            batch_texts = texts[start_idx:end_idx]
-            
-            batch_embeddings = []
-            for text in batch_texts:
-                try:
-                    embedding = self.model.create_embedding(text)['data'][0]['embedding']
-                    batch_embeddings.append(embedding)
-                except Exception as e:
-                    print(f"Error encoding text: {e}")
-                    batch_embeddings.append([0.0] * self.embedding_dimension)
-			
-            if len(batch_embeddings) != len(batch_texts):
-                batch_embeddings.extend([[0.0] * self.embedding_dimension] * (len(batch_texts) - len(batch_embeddings)))
-			
-            embeddings.extend(batch_embeddings)
-                
-        vecs = np.array(embeddings, dtype=np.float32)
+        if not self._use_llama:
+            # Delegate to HF sentence-transformers implementation
+            vecs = self.model.encode(
+                texts,
+                batch_size=batch_size,
+                normalize_embeddings=False,
+                show_progress_bar=show_progress_bar,
+            )
+            vecs = np.asarray(vecs, dtype=np.float32)
+        else:
+            embeddings = []
+            # Process in batches
+            num_batches = (len(texts) + batch_size - 1) // batch_size
+
+            for i in tqdm(range(num_batches), desc="Encoding", disable=not show_progress_bar):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, len(texts))
+                batch_texts = texts[start_idx:end_idx]
+
+                batch_embeddings = []
+                for text in batch_texts:
+                    try:
+                        embedding = self.model.create_embedding(text)['data'][0]['embedding']
+                        batch_embeddings.append(embedding)
+                    except Exception as e:
+                        print(f"Error encoding text: {e}")
+                        batch_embeddings.append([0.0] * self.embedding_dimension)
+
+                if len(batch_embeddings) != len(batch_texts):
+                    batch_embeddings.extend(
+                        [[0.0] * self.embedding_dimension] * (len(batch_texts) - len(batch_embeddings))
+                    )
+
+                embeddings.extend(batch_embeddings)
+
+            vecs = np.array(embeddings, dtype=np.float32)
         
         # Normalize if requested
         if normalize:

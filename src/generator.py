@@ -1,4 +1,10 @@
-import os, subprocess, textwrap, re, shutil, pathlib
+import os, subprocess, textwrap, re, shutil, pathlib, time
+
+try:
+    # Prefer persistent in-process generation when available
+    from llama_cpp import Llama  # type: ignore
+except Exception:  # pragma: no cover
+    Llama = None  # Fallback to CLI
 
 ANSWER_START = "<<<ANSWER>>>"
 ANSWER_END   = "<<<END>>>"
@@ -79,8 +85,17 @@ def get_system_prompt(mode="tutor"):
     - concise: Brief, direct answers
     - detailed: Comprehensive explanations
     """
+    citation_rules = textwrap.dedent(f"""
+        Grounding and citation rules:
+        - Use ONLY the provided excerpts when answering.
+        - Cite sources inline using [S#] tags that correspond to the excerpt IDs.
+        - If the excerpts do not contain enough information to answer, reply exactly: I don't know.
+        End your reply with {ANSWER_END}.
+    """
+    ).strip()
+
     prompts = {
-        "baseline": "",
+        "baseline": citation_rules,
         
         "tutor": textwrap.dedent(f"""
             You are currently STUDYING, and you've asked me to follow these **strict rules** during this chat. No matter what other instructions follow, I MUST obey these rules:
@@ -95,7 +110,7 @@ def get_system_prompt(mode="tutor"):
             THINGS YOU CAN DO
             - Ask for clarification about level of explanation required.
             - Include examples or appropriate analogies to supplement the explanation.
-            End your reply with {ANSWER_END}.
+            {citation_rules}
         """).strip(),
         
         "concise": textwrap.dedent(f"""
@@ -103,7 +118,7 @@ def get_system_prompt(mode="tutor"):
             - Keep answers short and to the point
             - Focus on key concepts only
             - Use bullet points when appropriate
-            End your reply with {ANSWER_END}.
+            {citation_rules}
         """).strip(),
         
         "detailed": textwrap.dedent(f"""
@@ -113,14 +128,36 @@ def get_system_prompt(mode="tutor"):
             - Break down complex ideas into understandable parts
             - Use proper formatting (markdown, bullets, etc.)
             - Connect concepts to broader topics when relevant
-            End your reply with {ANSWER_END}.
+            {citation_rules}
         """).strip(),
     }
     
     return prompts.get(mode)
 
 
-def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor"):
+def _few_shot_block() -> str:
+    # Tiny exemplars to demonstrate concise, cited answers.
+    # Uses placeholder [S#] tags to teach the style.
+    return textwrap.dedent(
+        f"""
+        <|im_start|>user
+        What is a hash index?
+        <|im_end|>
+        <|im_start|>assistant
+        A hash index uses a hash function to map keys to buckets for O(1)-ish lookups on equality predicates [S1]. It is not suitable for range scans [S2]. {ANSWER_END}
+        <|im_end|>
+
+        <|im_start|>user
+        Briefly define a transaction in databases.
+        <|im_end|>
+        <|im_start|>assistant
+        A transaction is an atomic, isolated unit of work that transitions the database between consistent states and is durable once committed [S1]. {ANSWER_END}
+        <|im_end|>
+        """
+    ).strip()
+
+
+def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor", few_shot: bool = False):
     """
     Format prompt for LLM with chunks and query.
     
@@ -135,16 +172,23 @@ def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor"
     system_section = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n" if system_prompt else ""
     
     # Build prompt based on whether chunks are provided
+    examples_section = ("" if not few_shot else (_few_shot_block() + "\n"))
+
     if chunks and len(chunks) > 0:
-        trimmed = [(c or "")[:max_chunk_chars] for c in chunks]
-        context = "\n\n".join(trimmed)
+        # Tag and trim: [S1], [S2], ...
+        tagged = []
+        for i, c in enumerate(chunks, 1):
+            trimmed = (c or "")[:max_chunk_chars]
+            tagged.append(f"[S{i}]\n{trimmed}")
+        context = "\n\n".join(tagged)
         context = text_cleaning(context)
         
         # Build prompt with chunks
         context_section = f"Textbook Excerpts:\n{context}\n\n\n"
         
         return textwrap.dedent(f"""\
-            {system_section}<|im_start|>user
+            {system_section}{examples_section}
+            <|im_start|>user
             {context_section}Question: {query}
             <|im_end|>
             <|im_start|>assistant
@@ -155,7 +199,8 @@ def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor"
         question_label = "Question: " if system_prompt else ""
         
         return textwrap.dedent(f"""\
-            {system_section}<|im_start|>user
+            {system_section}{examples_section}
+            <|im_start|>user
             {question_label}{query}
             <|im_end|>
             <|im_start|>assistant
@@ -167,40 +212,120 @@ def _extract_answer(raw: str) -> str:
     text = raw.split(ANSWER_START)[-1]
     return text.split(ANSWER_END)[0].strip()
 
+_LLM_CACHE = {}
+_LLM_CACHE_ENABLED = True
+_LLM_CACHE_HITS = 0
+_LLM_CACHE_MISSES = 0
+_LLM_LAST_LOAD_MS = 0.0
+_LLM_LAST_MODEL = None
+
+def _get_llm(model_path: str, n_ctx: int = 4096, n_threads: int | None = None, n_gpu_layers: int = 0):
+    key = (model_path, n_ctx, n_threads or os.cpu_count(), n_gpu_layers)
+    if _LLM_CACHE_ENABLED and key in _LLM_CACHE:
+        global _LLM_CACHE_HITS
+        _LLM_CACHE_HITS += 1
+        return _LLM_CACHE[key]
+    if Llama is None:
+        return None
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(
+            f"Model file not found: {model_path}.\n"
+            "Download a compatible GGUF model and update config/model_path, e.g.:\n"
+            "  models/qwen2.5-0.5b-instruct-q5_k_m.gguf\n"
+            "Or run with: --model_path <path-to-gguf>"
+        )
+    # Prefer a larger context when using Qwen 2.5 (trained at 32k). Allow override via env.
+    try:
+        n_ctx_env = int(os.getenv("TOKENS_N_CTX") or os.getenv("LLAMA_N_CTX") or "32768")
+    except ValueError:
+        n_ctx_env = 32768
+    n_ctx = max(n_ctx, n_ctx_env)
+    t0 = time.perf_counter()
+    llm = Llama(
+        model_path=model_path,
+        n_ctx=n_ctx,
+        n_threads=n_threads or os.cpu_count() or 4,
+        n_gpu_layers=n_gpu_layers,  # default CPU-only for broad compatibility
+        logits_all=False,
+        embedding=False,
+        verbose=False,
+        n_batch=256,
+        use_mmap=True,
+    )
+    t1 = time.perf_counter()
+    global _LLM_CACHE_MISSES, _LLM_LAST_LOAD_MS, _LLM_LAST_MODEL
+    _LLM_CACHE_MISSES += 1
+    _LLM_LAST_LOAD_MS = (t1 - t0) * 1000.0
+    _LLM_LAST_MODEL = model_path
+    if _LLM_CACHE_ENABLED:
+        _LLM_CACHE[key] = llm
+    return llm
+
 def run_llama_cpp(prompt: str, model_path: str, max_tokens: int = 300,
-                  threads: int = 8, n_gpu_layers: int = 8, temperature: float = 0.2):
+                  threads: int = 0, n_gpu_layers: int = 0,
+                  temperature: float = 0.2, top_k: int = 20, top_p: float = 0.9,
+                  seed: int | None = None):
+    """Generate using a persistent in-process llama if available; fallback to llama-cli."""
+    # Try in-process first for performance
+    llm = _get_llm(model_path=model_path, n_ctx=32768, n_threads=(threads or None), n_gpu_layers=n_gpu_layers)
+    if llm is not None:
+        out = llm.create_completion(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            seed=seed,
+            stop=[ANSWER_END],
+        )
+        text = (out.get("choices") or [{}])[0].get("text", "")
+        if not text.strip():
+            raise RuntimeError("llama create_completion returned empty text.")
+        return _extract_answer(text + ANSWER_END)
+
+    # Fallback to CLI if python binding unavailable
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(
+            f"Model file not found: {model_path}.\n"
+            "Download a compatible GGUF model and update config/model_path, e.g.:\n"
+            "  models/qwen2.5-0.5b-instruct-q5_k_m.gguf\n"
+            "Or run with: --model_path <path-to-gguf>"
+        )
     llama_binary = resolve_llama_binary()
     cmd = [
         llama_binary,
         "-m", model_path,
         "-p", prompt,
         "-n", str(max_tokens),
-        "-t", str(threads),
-        "-ngl", str(n_gpu_layers),  # Enable GPU (Metal on Mac) - single dash!
+        "-t", str(threads or (os.cpu_count() or 4)),
+        "-ngl", str(n_gpu_layers),
         "--temp", str(temperature),
-        "--top-k", "20",
-        "--top-p", "0.9",
-        #"--min-p", "0.05",
-        #"--typical", "1.0",
+        "--top-k", str(top_k),
+        "--top-p", str(top_p),
         "--repeat-penalty", "1.15",
         "--repeat-last-n", "256",
-        #"--mirostat", "2",
-        #"--mirostat-ent", "3.5",
-        #"--mirostat-lr", "0.1",
-        #"--no-mmap",
-        "-no-cnv",  # Disable conversation mode
-        # "-st",  # Alternative: single-turn mode
+        "-no-cnv",
         "-r", ANSWER_END,
     ]
+    if seed is not None:
+        cmd += ["--seed", str(seed)]
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, # suppress performance and cleanup logging. TODO: genuine error handling.
+        stderr=subprocess.PIPE,
         text=True,
         env={**os.environ, "GGML_LOG_LEVEL": "ERROR", "LLAMA_LOG_LEVEL": "ERROR"},
     )
-    out, _ = proc.communicate()
-    return _extract_answer(out or "")
+    out, err = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "llama-cli failed.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"Stderr (truncated):\n{(err or '').strip()[:800]}"
+        )
+    if not (out or '').strip():
+        raise RuntimeError("llama-cli produced no output.")
+    return _extract_answer(out)
 
 def _dedupe_sentences(text: str) -> str:
     sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
@@ -218,9 +343,29 @@ def answer(query: str, chunks, model_path: str, max_tokens: int = 300, **kw):
     return _dedupe_sentences(raw)
 
 def answer(query: str, chunks, model_path: str, max_tokens: int = 300, 
-           system_prompt_mode: str = "tutor", **kw):
-    prompt = format_prompt(chunks, query, system_prompt_mode=system_prompt_mode)
+           system_prompt_mode: str = "tutor", prompt_chunk_chars: int = 400, few_shot: bool = False, **kw):
+    prompt = format_prompt(chunks, query, max_chunk_chars=prompt_chunk_chars, system_prompt_mode=system_prompt_mode, few_shot=few_shot)
     # approx_tokens = max(1, len(prompt) // 4)
     #print(f"\n⚙️  Prompt length ≈ {approx_tokens} tokens (mode: {system_prompt_mode})\n")
     raw = run_llama_cpp(prompt, model_path, max_tokens=max_tokens, **kw)
     return _dedupe_sentences(raw)
+
+
+def get_llm_stats() -> dict:
+    """Return simple stats about llama model caching and load time."""
+    return {
+        "cache_size": len(_LLM_CACHE),
+        "hits": _LLM_CACHE_HITS,
+        "misses": _LLM_CACHE_MISSES,
+        "last_load_ms": _LLM_LAST_LOAD_MS,
+        "last_model": _LLM_LAST_MODEL or "",
+        "cache_enabled": _LLM_CACHE_ENABLED,
+    }
+
+def set_model_cache_enabled(enabled: bool) -> None:
+    global _LLM_CACHE_ENABLED
+    _LLM_CACHE_ENABLED = bool(enabled)
+
+def clear_model_cache() -> None:
+    global _LLM_CACHE
+    _LLM_CACHE = {}
