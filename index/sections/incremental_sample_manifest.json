@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "index_prefix": "incremental_sample",
+  "config_fingerprint": "4b360482e63c4b1e783f4f4bd844bcc058caa238c1c5ef7f34f8bb7ff4d3c0fe",
+  "documents": [
+    {
+      "source_path": "data/incremental_indexing_sample.md",
+      "source_hash": "15eb4df9330b1ad72d1f0cab0def3aae5823b0ba840cc2a391696de5273fb736",
+      "artifact_path": "index/sections/incremental_sample_doc_e43c1fd5547daf45.pkl",
+      "chunk_count": 3,
+      "config_fingerprint": "4b360482e63c4b1e783f4f4bd844bcc058caa238c1c5ef7f34f8bb7ff4d3c0fe",
+      "updated_at": 1775593042
+    }
+  ],
+  "stats": {
+    "total_documents": 1,
+    "reused_documents": 1,
+    "rebuilt_documents": 0,
+    "deleted_documents": 0,
+    "chunks_reused": 3,
+    "chunks_embedded": 0
+  },
+  "timings_seconds": {
+    "hash_and_manifest_check": 0.018757988999823283,
+    "document_reuse_load": 0.013135891000274569,
+    "document_rebuild": 0.0,
+    "model_load": 0.0,
+    "embedding": 0.0,
+    "merge_total": 0.00012312900071265176,
+    "faiss_rebuild": 0.013726948000112316,
+    "bm25_rebuild": 0.023252336000041396,
+    "artifact_writes": 0.06396505700013222,
+    "manifest_write": 0.012083075999726134,
+    "total": 0.1616451629997755
+  },
+  "updated_at": 1775593610
+}

@@ -268,9 +268,12 @@ def pytest_sessionfinish(session, exitstatus):
     
     # Only generate HTML report if in html mode
     if output_mode == "html":
-        from tests.utils import generate_summary_report
-        results_dir = Path(__file__).parent / "results"
-        generate_summary_report(results_dir)
+        try:
+            from tests.utils import generate_summary_report
+            results_dir = Path(__file__).parent / "results"
+            generate_summary_report(results_dir)
+        except ImportError as e:
+            print(f"\nSkipping HTML report generation: missing optional dependency ({e})")
     else:
         print("\n✅ Test session complete (terminal output mode)")
 

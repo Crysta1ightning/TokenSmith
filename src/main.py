@@ -42,6 +42,10 @@ def parse_args() -> argparse.Namespace:
     indexing_group.add_argument("--keep_tables", action="store_true")
     indexing_group.add_argument("--multiproc_indexing", action="store_true")
     indexing_group.add_argument("--embed_with_headings", action="store_true")
+    indexing_group.add_argument(
+        "--markdown_file",
+        help="index only one markdown file instead of all data/*.md files"
+    )
     parser.add_argument(
         "--double_prompt",
         action="store_true",
@@ -55,18 +59,26 @@ def run_index_mode(args: argparse.Namespace, cfg: RAGConfig):
     chunker = DocumentChunker(strategy=strategy, keep_tables=args.keep_tables)
     artifacts_dir = cfg.get_artifacts_directory()
 
-    data_dir = pathlib.Path("data")
-    print(f"Looking for markdown files in {data_dir.resolve()}...")
-    md_files = sorted(data_dir.glob("*.md"))
+    if args.markdown_file:
+        md_files = [pathlib.Path(args.markdown_file)]
+        print(f"Indexing explicit markdown file: {md_files[0].resolve()}")
+    else:
+        data_dir = pathlib.Path("data")
+        print(f"Looking for markdown files in {data_dir.resolve()}...")
+        md_files = sorted(data_dir.glob("*.md"))
     print(f"Found {len(md_files)} markdown files.")
     print(f"First 5 markdown files: {[str(f) for f in md_files[:5]]}")
 
     if not md_files:
         print("ERROR: No markdown files found in data/.", file=sys.stderr)
         sys.exit(1)
+    missing_files = [path for path in md_files if not path.exists()]
+    if missing_files:
+        print(f"ERROR: Markdown file not found: {missing_files[0]}", file=sys.stderr)
+        sys.exit(1)
 
     build_index(
-        markdown_file=str(md_files[0]),
+        markdown_file=md_files,
         chunker=chunker,
         chunk_config=cfg.chunk_config,
         embedding_model_path=cfg.embed_model,

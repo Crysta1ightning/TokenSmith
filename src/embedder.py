@@ -69,7 +69,7 @@ class SentenceTransformer:
             n_ctx=n_ctx,
             n_threads=n_threads,
             embedding=True,
-            verbose=True,
+            verbose=False,
             use_mmap=True,
             n_gpu_layers=-1 # use GPU if available
         )
