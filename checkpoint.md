@@ -115,10 +115,10 @@ For this controlled sample, the unchanged incremental rebuild reused all 3 cache
 
 This supports the current design choice for the baseline implementation: cache the expensive per-document artifacts and embeddings, while rebuilding global FAISS/BM25 for correctness and compatibility.
 
-This should not be overstated as a full-corpus result. The full WBL textbook benchmark was not rerun because it would take too long. A safe writeup claim is:
+This should not be overstated as a full-corpus result. A larger end-to-end benchmark was not rerun because it would take too long. A safe writeup claim is:
 
 ```text
-Because the full WBL benchmark was too costly to rerun within the project time budget, I used a small controlled markdown document to validate the design. The benchmark shows that unchanged documents do not reload the embedding model and do not re-embed chunks. FAISS and BM25 are still rebuilt globally for correctness, and in the controlled run their combined cost was 0.037s on the unchanged incremental rebuild. This supports the current implementation while leaving full-corpus FAISS/BM25 scaling as future evaluation work.
+Because a full-corpus benchmark was too costly to rerun within the project time budget, I used a small controlled markdown document to validate the design. The benchmark shows that unchanged documents do not reload the embedding model and do not re-embed chunks. FAISS and BM25 are still rebuilt globally for correctness, and in the controlled run their combined cost was 0.037s on the unchanged incremental rebuild. This supports the current implementation while leaving full-corpus FAISS/BM25 scaling as future evaluation work.
 ```
 
 ## Commit Note
