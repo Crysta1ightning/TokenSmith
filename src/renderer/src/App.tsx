@@ -911,6 +911,10 @@ function isFreshConversation(conversation: Conversation) {
   return conversation.messages.length === 0 && conversation.title === 'New Study Chat'
 }
 
+function hasConversationContent(conversation: Conversation) {
+  return !isFreshConversation(conversation)
+}
+
 function startWithFreshConversation(conversations: Conversation[]) {
   const savedConversations = conversations.length > 0 ? conversations : structuredClone(starterConversations)
   const existingFresh = savedConversations.find(isFreshConversation)
@@ -920,7 +924,7 @@ function startWithFreshConversation(conversations: Conversation[]) {
       activeConversationId: existingFresh.id,
       conversations: [
         existingFresh,
-        ...savedConversations.filter((conversation) => conversation.id !== existingFresh.id)
+        ...savedConversations.filter((conversation) => !isFreshConversation(conversation))
       ]
     }
   }
@@ -2770,18 +2774,13 @@ function ChatScreen({
   function handleNewChat() {
     cancelForeground()
     requestSequenceRef.current += 1
-
-    const newConversation: Conversation = {
-      id: createId('conversation'),
-      title: 'New Study Chat',
-      period: 'Today',
-      messages: []
-    }
-
-    onChatStateChange((current) => ({
-      conversations: [newConversation, ...current.conversations],
-      activeConversationId: newConversation.id
-    }))
+    onChatStateChange((current) => {
+      const conversation = current.conversations.find(isFreshConversation) ?? createFreshConversation()
+      return {
+        conversations: [conversation, ...current.conversations.filter((item) => !isFreshConversation(item))],
+        activeConversationId: conversation.id
+      }
+    })
     setPendingConversationId(null)
     setPendingExplanationId(null)
     explanationInFlightRef.current = false
@@ -4357,7 +4356,7 @@ function ChatScreen({
             <ConversationGroup
               activeConversationId={activeConversation.id}
               label="Today"
-              items={conversations.filter((chat) => chat.period === 'Today')}
+              items={conversations.filter((chat) => chat.period === 'Today' && hasConversationContent(chat))}
               renameDraft={renameDraft}
               renamingConversationId={renamingConversationId}
               onCancelRename={handleCancelRenameConversation}
@@ -4370,7 +4369,7 @@ function ChatScreen({
             <ConversationGroup
               activeConversationId={activeConversation.id}
               label="This week"
-              items={conversations.filter((chat) => chat.period === 'This week')}
+              items={conversations.filter((chat) => chat.period === 'This week' && hasConversationContent(chat))}
               renameDraft={renameDraft}
               renamingConversationId={renamingConversationId}
               onCancelRename={handleCancelRenameConversation}
